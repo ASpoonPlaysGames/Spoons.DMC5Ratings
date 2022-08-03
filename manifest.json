@@ -1,9 +1,11 @@
 {
-    "name": "Spoons_Trol",
+    "name": "Spoons_DMC5Ratings",
     "version_number": "1.0.0",
-    "website_url": "https://github.com/ASpoonPlaysGames/Spoons.Trol",
-    "description": "Literally just turns the satchel clacker detonator into a trol face",
+    "website_url": "https://github.com/ASpoonPlaysGames/Spoons.DMC5Ratings",
+    "description": "Implements the DMC5 Ratings system, with selectable songs",
     "dependencies": [
-        "northstar-Northstar-1.9.0"
+        "northstar-Northstar-1.9.1",
+        "EladNLG-ModSettings-1.0.0",
+        "S2Mods-ClientKillCallback-1.0.0"
     ]
 }
