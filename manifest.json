@@ -1,0 +1,9 @@
+{
+    "name": "Spoons_Trol",
+    "version_number": "1.0.0",
+    "website_url": "https://github.com/ASpoonPlaysGames/Spoons.Trol",
+    "description": "Literally just turns the satchel clacker detonator into a trol face",
+    "dependencies": [
+        "northstar-Northstar-1.9.0"
+    ]
+}

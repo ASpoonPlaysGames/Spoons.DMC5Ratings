@@ -1,0 +1,46 @@
+{
+    "Name": "Spoons.DMC5Ratings",
+    "Description": "REPLACE THIS TEXT",
+    "Version": "0.0.0",
+
+    "LoadPriority": 1,
+    "ConVars": 
+    [
+        {
+            "Name": "dmc5_song",
+            "DefaultValue": "Silver Bullet",
+            "Flags": 16777216
+        }
+    ],
+    "Scripts": 
+    [
+        {
+            "Path": "cl_style_points.gnut",
+            "RunOn": "CLIENT",
+            "ClientCallback":
+            {
+                "Before": "StylePoints_Init"
+            }
+        },
+        {
+            "Path": "client/cl_music.gnut"
+        },
+        {
+            "Path": "_style_points_dependencies.gnut",
+            "RunOn": "UI",
+            "UICallback":
+            {
+                "After": "CheckDependencies"
+            }
+        }
+    ],
+    "Localisation": 
+    [
+        "resource/style_points_%language%.txt"
+    ],
+    "Dependencies":
+    {
+        "STYLE_POINTS_HAS_KILL_CALLBACKS": "S2.ClientKillCallback",
+        "STYLE_POINTS_HAS_MOD_SETTINGS": "Mod Settings"
+    }
+}

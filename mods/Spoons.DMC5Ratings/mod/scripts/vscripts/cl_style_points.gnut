@@ -1,0 +1,798 @@
+global function StylePoints_Init
+
+global function StylePoints_RoundEnded
+
+global function DoStylePointsMusic
+
+global array<string> dmc5SongArray = [ 
+    "Silver Bullet",
+    "Bury The Light",
+    "The Duel"
+]
+
+const int USE_RANK_OUTRO = -1 // this is basically used if no next track should play
+const int USE_RANK_NONE = 0
+const int USE_RANK_SIMPLE = 1
+const int USE_RANK_FULL = 2
+
+
+const int STYLE_RANK_D = 0
+const int STYLE_RANK_C = 1
+const int STYLE_RANK_B = 2
+const int STYLE_RANK_A = 3
+const int STYLE_RANK_S = 4
+const int STYLE_RANK_SS = 5
+const int STYLE_RANK_SSS = 6
+
+const int STYLE_POINTS_MAX_POINTS = 1300 // max points
+const int STYLE_POINTS_LEAK_PER_SEC = 25 // the amount of points you lose passively every second
+
+const int STYLE_POINTS_RUI_MIN_SIZE = 96
+const int STYLE_POINTS_RUI_MAX_SIZE = 144
+const int STYLE_POINTS_RUI_SIZE_HOLD_TIME = 2
+
+const int STYLE_POINTS_AVG_SPEED = 400 // you gain a multiplier on your points based on if you are going faster or slower than this value
+
+const float STYLE_POINTS_MAX_SEEK = 5
+
+const float STYLE_POINTS_KILL_TIME = 5 // time in seconds where you get bonus points for another kill
+
+// structs for music
+struct dmc5Piece
+{
+    float startAt
+    float playFor
+    string eventID
+
+    bool shouldLoop
+    string nextPiece
+    int nextPieceUsesRank = USE_RANK_NONE
+    
+    
+}
+
+struct dmc5Song
+{
+    table<string, dmc5Piece> pieces = {}
+    table<string, void functionref( string )> events = {}
+}
+
+// general things
+struct
+{
+    // music
+    table<string, dmc5Song> songs
+    string currentSong
+    string currentPiece = "intro_0"
+    bool hasStarted = false
+    entity signaler 
+
+    // scoring
+    float currentScore = 0
+    float timeOfLastKill = 0
+    int numKills = 0
+
+    // ui
+    var currentScoreRui
+    float uiSizeScale = 0 // between 0 and 1 where 0 = STYLE_POINTS_RUI_MIN_SIZE and 1 = STYLE_POINTS_RUI_MAX_SIZE
+} file
+
+const MAX_NUMTIMES = 4
+const NUMTIMES_REDUCTION_DELAY = 30
+
+void function StylePoints_Init()
+{
+    RegisterSignal( "StylePoints_StopLoop" )
+
+    StylePoints_PopulateSongTable()
+    thread StylePoints_InitSignaler()
+
+    if ( GetMapName() == "mp_lobby" )
+    {
+        printt( "[DMC5RATINGS] map is lobby, hiding rating" )
+    }
+    else
+    {
+        printt( "[DMC5RATINGS] map is not lobby, showing rating" )
+        AddCallback_OnClientScriptInit( StylePoints_UI_Init )
+        thread DoStylePointsMusic()
+        thread StylePoints_LeakPoints()
+    }
+
+    #if STYLE_POINTS_HAS_KILL_CALLBACKS
+        AddCallback_OnPlayerKilled( StylePoints_OnKill )
+    #endif
+    
+}
+
+void function StylePoints_InitSignaler()
+{
+
+    while ( !IsValid( file.signaler ) && !IsValid( GetLocalClientPlayer() ) )
+        WaitFrame()
+    file.signaler = GetLocalClientPlayer()
+}
+
+
+void function StylePoints_UI_Init( entity ent )
+{
+    var rui = RuiCreate( $"ui/cockpit_console_text_center.rpak", clGlobal.topoCockpitHudPermanent, RUI_DRAW_COCKPIT, 5 )
+	RuiSetInt( rui, "maxLines", 1 )
+	RuiSetInt( rui, "lineNum", 1 )
+	RuiSetFloat2( rui, "msgPos", <0.4, -0.15, 0> )
+	RuiSetFloat3( rui, "msgColor", <1, 1, 1> )
+	RuiSetString( rui, "msgText", "0" )
+	RuiSetFloat( rui, "msgFontSize", 96.0 )
+	RuiSetFloat( rui, "msgAlpha", 0.9 )
+	RuiSetFloat( rui, "thicken", 0.0 )
+
+    printt( "[DMC5RATINGS] Added RUI Element" )
+	
+
+	file.currentScoreRui = rui
+}
+
+/////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////
+////                                                             ////
+////   ██████   █████  ███    ██ ██   ██ ██ ███    ██  ██████    ////
+////   ██   ██ ██   ██ ████   ██ ██  ██  ██ ████   ██ ██         ////
+////   ██████  ███████ ██ ██  ██ █████   ██ ██ ██  ██ ██   ███   ////
+////   ██   ██ ██   ██ ██  ██ ██ ██  ██  ██ ██  ██ ██ ██    ██   ////
+////   ██   ██ ██   ██ ██   ████ ██   ██ ██ ██   ████  ██████    ////
+////                                                             ////
+/////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////
+
+// atm this is only for players, but i have put functionality for AI as well
+void function StylePoints_OnKill( entity victim, entity attacker, int damageSourceId )
+{
+    // if we have nothing to do with this kill, do nothing
+    if ( GetLocalClientPlayer() != victim && GetLocalClientPlayer() != attacker )
+        return
+
+    float scoreGain = 200
+
+    // we got a kill
+    if ( GetLocalClientPlayer() == attacker && GetLocalClientPlayer() != victim )
+    {
+        // bonus for speed
+        scoreGain *= Length( attacker.GetVelocity() ) / STYLE_POINTS_AVG_SPEED
+
+        // bonus for killing things fast
+        float timeDiff = Time() - file.timeOfLastKill
+        if ( timeDiff < STYLE_POINTS_KILL_TIME )
+        {
+            scoreGain *= 1 + STYLE_POINTS_KILL_TIME / timeDiff
+        }
+
+        // bonus for titan kills
+        if ( victim.IsTitan() )
+            scoreGain *= 2
+
+        // reduction for AI
+        if ( victim.IsNPC() )
+        {
+            switch ( victim.GetSignifierName() )
+            {
+                case "npc_soldier":
+                case "npc_spectre":
+                case "npc_frag_drone":
+                case "npc_stalker":
+                    scoreGain *= 0.2
+                    break
+                case "npc_titan":
+                    scoreGain *= 0.5 // reduction for AI titans, compensates for the 2x multiplier for being a titan
+                    break
+                case "npc_superspectre":
+                    scoreGain *= 0.4
+                    break
+                default:
+                    scoreGain *= 0.25
+                    break
+            }
+        }
+        else
+        {
+            if ( victim.p.pilotEjecting ) // bonus for goosing
+                scoreGain *= 1.2
+
+            // titans are less stylish, unless its a titan only mode ig
+            if ( attacker.IsTitan() && ![FD, FD_EASY, FD_NORMAL, FD_HARD, FD_MASTER, FD_INSANE, TITAN_BRAWL, LAST_TITAN_STANDING].contains( GameRules_GetGameMode() ) )
+                scoreGain *= 0.5
+
+            // some ways of killing people give more points
+        }
+        file.uiSizeScale += 0.7
+        file.numKills++
+    }
+    // we got killed
+    else if ( GetLocalClientPlayer() == victim )
+    {
+        scoreGain *= -1 // L
+        if ( GetLocalClientPlayer() == attacker || !attacker.IsPlayer() )
+            scoreGain *= 1.5 // bigger L
+
+        file.uiSizeScale = 0
+    }
+
+    printt( "[DMC5RATINGS] Score Gain: " + scoreGain )
+    file.currentScore += scoreGain
+    file.timeOfLastKill = Time()
+    if (file.numKills == 3)
+    {
+        thread StylePoints_Event( "intro_end", "intro" )
+    } 
+}
+
+vector function GetTriLerpColor( float fraction, vector color1 = <1, 1, 1>, vector color2 = <0.3, 0, 0.7> , vector color3 = <1, 0.05, 0> )
+{
+	float crossover1 = 0.2  // from zero to this fraction, fade between color1 and color2
+	float crossover2 = 0.8  // from crossover1 to this fraction, fade between color2 and color3
+
+	float r, g, b
+
+	// 0 = full charge, 1 = no charge remaining
+	if ( fraction < crossover1 )
+	{
+		r = Graph( fraction, 0, crossover1, color1.x, color2.x )
+		g = Graph( fraction, 0, crossover1, color1.y, color2.y )
+		b = Graph( fraction, 0, crossover1, color1.z, color2.z )
+		return <r, g, b>
+	}
+	else if ( fraction < crossover2 )
+	{
+		r = Graph( fraction, crossover1, crossover2, color2.x, color3.x )
+		g = Graph( fraction, crossover1, crossover2, color2.y, color3.y )
+		b = Graph( fraction, crossover1, crossover2, color2.z, color3.z )
+		return <r, g, b>
+	}
+	else
+	{
+		// for the last bit of overload timer, keep it max danger color
+		r = color3.x
+		g = color3.y
+		b = color3.z
+		return <r, g, b>
+	}
+
+	unreachable
+}
+
+void function StylePoints_LeakPoints()
+{
+    bool hasEnded = false
+    while ( !IsValid( GetLocalClientPlayer() ) )
+        WaitFrame()
+    float oldTime = Time()
+    while ( true )
+    {
+        float timeDifference = Time() - oldTime
+        file.currentScore -= STYLE_POINTS_LEAK_PER_SEC * timeDifference
+        file.uiSizeScale -= timeDifference / STYLE_POINTS_RUI_SIZE_HOLD_TIME
+        oldTime = Time()
+        if ( file.currentScore < 0 )
+            file.currentScore = 0
+        if ( file.currentScore > STYLE_POINTS_MAX_POINTS )
+            file.currentScore = STYLE_POINTS_MAX_POINTS
+
+        if ( file.uiSizeScale < 0 )
+            file.uiSizeScale = 0
+        if ( file.uiSizeScale > 1 )
+            file.uiSizeScale = 1
+        if ( IsValid( file.currentScoreRui ) )
+        {
+            if ( file.currentScore == 0 )
+            {
+                RuiSetString( file.currentScoreRui, "msgText", "" )
+            }
+            else
+            {
+                RuiSetString( file.currentScoreRui, "msgText", StylePoints_GetRank() )
+                RuiSetFloat3( file.currentScoreRui, "msgColor", GetTriLerpColor( file.currentScore / STYLE_POINTS_MAX_POINTS ) )
+            }
+            float size = STYLE_POINTS_RUI_MIN_SIZE + ( file.uiSizeScale * ( STYLE_POINTS_RUI_MAX_SIZE - STYLE_POINTS_RUI_MIN_SIZE ) )
+            RuiSetFloat( file.currentScoreRui, "msgFontSize", size )
+        }
+
+        // style points things
+	    if ( !hasEnded && GetGameState() == eGameState.WinnerDetermined )
+	    {   
+	    	StylePoints_RoundEnded()
+            hasEnded = true
+	    }
+        WaitFrame()
+    }
+    
+}
+
+void function StylePoints_RoundEnded()
+{
+    printt( "[DMC5RATINGS] ROUND ENDED" )
+    thread StylePoints_Event( "round_end", "outro_0" )
+}
+
+void function StylePoints_UpdateRank()
+{
+}
+
+
+
+string function StylePoints_GetRank( bool useSimple = false )
+{
+    //     0 - 200    D
+    //   200 - 400    C
+    //   400 - 600    B
+    //   600 - 800    A
+    //   800 - 1000   S
+    //  1000 - 1200   SS
+    //  1200 - 1400   SSS
+    if ( useSimple )
+    {
+        if ( file.currentScore > 800 )
+            return "high"
+        return "low"
+    }
+    else
+    { 
+        if ( file.currentScore > 1200 )
+            return "SSS"
+        if ( file.currentScore > 1000 )
+            return "SS"
+        if ( file.currentScore > 800 )
+            return "S"
+        if ( file.currentScore > 600 )
+            return "A"
+        if ( file.currentScore > 400 )
+            return "B"
+        if ( file.currentScore > 200 )
+            return "C"
+        if ( file.currentScore > 0 )
+            return "D"
+        
+        return ""
+    }
+
+    unreachable
+    
+}
+
+
+////////////////////////////////////////////////////
+////////////////////////////////////////////////////
+////                                            ////
+////   ███    ███ ██    ██ ███████ ██  ██████   ////
+////   ████  ████ ██    ██ ██      ██ ██        ////
+////   ██ ████ ██ ██    ██ ███████ ██ ██        ////
+////   ██  ██  ██ ██    ██      ██ ██ ██        ////
+////   ██      ██  ██████  ███████ ██  ██████   ////
+////                                            ////
+////////////////////////////////////////////////////
+////////////////////////////////////////////////////
+
+void function DoStylePointsMusic()
+{
+    if ( file.hasStarted )
+        return
+    file.hasStarted = true
+    while( !IsValid( GetLocalClientPlayer() ) )
+        WaitFrame()
+    
+    file.currentSong = dmc5SongArray[GetConVarInt( "dmc5_song" )]
+    thread StylePoints_PlayMusic()
+}
+
+void function StylePoints_Event( string eventName, string arg )
+{
+    try
+    {
+        printt( "[DMC5RATINGS] Doing event '" + eventName + "' with argument '" + arg + "'" )
+        file.songs[file.currentSong].events[eventName]( arg )
+    }
+    catch ( exception )
+    {
+        printt( "[DMC5RATINGS] Doing event - Failed!" )
+        printt( "[DMC5RATINGS] No event with name '" + eventName + "' for song '" + file.currentSong + "'" )
+    }
+    
+}
+
+void function StylePoints_PlayMusic()
+{
+    
+    file.signaler.EndSignal( "StylePoints_StopLoop" )
+    EndSignal( file.signaler, "StylePoints_StopLoop" )
+    while ( file.currentPiece != "" ) // break from loops at end of songs by setting the current piece to an empty string
+    {
+        // get the next piece
+        dmc5Piece piece = file.songs[file.currentSong].pieces[file.currentPiece]
+        string eventID = piece.eventID
+        // play the next piece
+        
+        var handle = EmitSoundOnEntity( GetLocalClientPlayer(), eventID )
+        SetPlayThroughKillReplay( handle )
+        // wait
+        StylePoints_Wait( piece.playFor )
+    }
+}
+
+void function StylePoints_TryNextPiece( string advanceFrom )
+{
+    printt( "[DMC5RATINGS] Trying to advance from piece: " + advanceFrom )
+    array<string> splitted = split( file.currentPiece, "_" )
+    string currentPieceString = splitted[1]
+    if ( splitted.len() == 2 )
+        currentPieceString = splitted[0]
+
+    printt( "[DMC5RATINGS] Current piece: " + currentPieceString )
+    if ( currentPieceString != advanceFrom )
+    {
+        printt( "[DMC5RATINGS] Not advancing piece." )
+        return
+    }
+    string piece = StylePoints_GetNextPiece( true )
+    printt( "[DMC5RATINGS] Advancing piece!" )
+    StylePoints_ForcePiece( piece )
+}
+
+void function StylePoints_ForcePiece( string pieceString )
+{
+    file.signaler.Signal( "StylePoints_StopLoop" )
+    WaitFrame()
+
+    dmc5Piece piece = file.songs[file.currentSong].pieces[pieceString]
+    
+    dmc5Piece oldPiece = file.songs[file.currentSong].pieces[file.currentPiece]
+    
+    
+    file.currentPiece = pieceString
+    // play sound
+    thread StylePoints_PlayMusic()
+    wait piece.startAt
+    printt( "[DMC5RATINGS] Playing piece: " + file.currentPiece )
+    StopSoundOnEntity( GetLocalClientPlayer(), oldPiece.eventID )
+}
+
+void function StylePoints_Wait( float waitTime )
+{
+    wait waitTime - STYLE_POINTS_MAX_SEEK
+    string pieceString = StylePoints_GetNextPiece() // at this point the next piece is locked in and won't change based on player actions ( except from events )
+    if ( pieceString == "" )
+    {
+        file.currentPiece = pieceString
+        return
+    }
+    dmc5Piece piece = file.songs[file.currentSong].pieces[pieceString]
+    printt( "[DMC5RATINGS] Next piece will be: " + pieceString )
+    
+    
+    wait STYLE_POINTS_MAX_SEEK - piece.startAt
+    file.currentPiece = pieceString
+    printt( "[DMC5RATINGS] Playing piece: " + file.currentPiece )
+
+}
+
+
+
+string function StylePoints_GetNextPiece( bool ignoreLoop = false )
+{
+    dmc5Song song = file.songs[file.currentSong]
+    dmc5Piece currentPiece = song.pieces[file.currentPiece]
+    
+
+    // if looping, return the currentPiece
+    if ( !ignoreLoop && currentPiece.shouldLoop )
+        return file.currentPiece
+    
+    // get next piece base
+    string returnString = currentPiece.nextPiece
+
+    // check if next piece should use rank
+    switch ( currentPiece.nextPieceUsesRank )
+    {
+        case ( USE_RANK_NONE ):
+            break
+        case ( USE_RANK_SIMPLE ):
+            returnString = StylePoints_GetRank( true ) + "_" + returnString
+            break
+        case ( USE_RANK_FULL ):
+            returnString = StylePoints_GetRank( false ) + "_" + returnString
+            break
+        case ( USE_RANK_OUTRO ):
+            return ""
+            break
+    }
+
+    // get next loop index ( or first )
+    array<string> splitted = split( file.currentPiece, "_" )
+    int parsedIndex = splitted[splitted.len() - 1].tointeger() // this will crash if length of 0, but that shouldn't ever happen, right? : ) 
+    parsedIndex++
+    string tryThis = returnString + "_" + parsedIndex
+    try
+    {
+        dmc5Piece piece = song.pieces[tryThis]
+        return tryThis
+    }
+    catch ( exception )
+    {
+        tryThis = returnString + "_" + 0
+        try
+        {
+            dmc5Piece piece = song.pieces[tryThis]
+            return tryThis
+        }
+        catch ( exception_2 )
+        {
+            return returnString
+        }
+    }
+    unreachable
+    
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////
+////                                                                                      ////
+////   ██████   ██████  ██████         ████████  █████  ██████  ██      ███████ ███████   ////
+////   ██   ██ ██    ██ ██   ██           ██    ██   ██ ██   ██ ██      ██      ██        ////
+////   ██████  ██    ██ ██████            ██    ███████ ██████  ██      █████   ███████   ////
+////   ██      ██    ██ ██                ██    ██   ██ ██   ██ ██      ██           ██   ////
+////   ██       ██████  ██      ██        ██    ██   ██ ██████  ███████ ███████ ███████   ////
+////                                                                                      ////
+//////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////
+// ███    ███ ██    ██ ███████ ██  ██████ //
+// ████  ████ ██    ██ ██      ██ ██      //
+// ██ ████ ██ ██    ██ ███████ ██ ██      //
+// ██  ██  ██ ██    ██      ██ ██ ██      //
+// ██      ██  ██████  ███████ ██  ██████ //
+////////////////////////////////////////////
+void function StylePoints_PopulateSongTable()
+{
+    ///////////////////
+    // SILVER BULLET //
+    ///////////////////
+    dmc5Song silver_bullet
+    
+    dmc5Piece silver_bullet_intro = 
+    {
+        startAt = 0
+        playFor = 108
+        eventID = "music_angelcity_mcor_opening"
+        shouldLoop = true
+        nextPiece = "intro-transition_0"
+        nextPieceUsesRank = USE_RANK_NONE
+        ...
+    } 
+    silver_bullet.pieces["intro_0"] <- silver_bullet_intro
+
+    dmc5Piece silver_bullet_intro_transition_0 = 
+    {
+        startAt = 0
+        playFor = 64.8
+        eventID = "music_angelcity_mcor_lose"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_SIMPLE
+        ...
+    } 
+    silver_bullet.pieces["intro-transition_0"] <- silver_bullet_intro_transition_0
+
+    dmc5Piece silver_bullet_low_0 = 
+    {
+        startAt = 1.1
+        playFor = 82.5
+        eventID = "music_angelcity_mcor_pilotaction1_low"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_SIMPLE
+        ...
+    }
+    silver_bullet.pieces["low_loop_0"] <- silver_bullet_low_0
+
+    dmc5Piece silver_bullet_high_0 = 
+    {
+        startAt = 1.1
+        playFor = 82.7
+        eventID = "music_angelcity_mcor_pilotaction1_high"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_SIMPLE
+        ...
+    }
+    silver_bullet.pieces["high_loop_0"] <- silver_bullet_high_0
+
+    dmc5Piece silver_bullet_outro =
+    {
+        startAt = 0
+        playFor = 7
+        eventID = "music_angelcity_mcor_win"
+        shouldLoop = false
+        nextPiece = ""
+        nextPieceUsesRank = USE_RANK_OUTRO
+        ...
+    }
+    silver_bullet.pieces["outro_0"] <- silver_bullet_outro
+
+    silver_bullet.events["intro_end"] <- StylePoints_TryNextPiece
+    silver_bullet.events["round_end"] <- StylePoints_ForcePiece
+
+    file.songs["Silver Bullet"] <- silver_bullet
+
+    //////////////
+    // THE DUEL //
+    //////////////
+
+    dmc5Song the_duel
+
+    dmc5Piece the_duel_intro = 
+    {
+        startAt = 0
+        playFor = 30 
+        eventID = "music_angelcity_mcor_titanaction1_low"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_SIMPLE
+        ...
+    }
+    the_duel.pieces["intro_0"] <- the_duel_intro
+
+    dmc5Piece the_duel_low_loop = 
+    {
+        startAt = 1.6
+        playFor = 87 
+        eventID = "music_angelcity_mcor_titanaction2_low"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_SIMPLE
+        ...
+    }
+    the_duel.pieces["low_loop_0"] <- the_duel_low_loop
+
+    dmc5Piece the_duel_high_loop = 
+    {
+        startAt = 3
+        playFor = 70 
+        eventID = "music_angelcity_mcor_titanaction2_high"
+        shouldLoop = false
+        nextPiece = "low_loop"
+        nextPieceUsesRank = USE_RANK_NONE
+        ...
+    }
+    the_duel.pieces["high_loop_0"] <- the_duel_high_loop
+
+    dmc5Piece the_duel_outro = 
+    {
+        startAt = 1.5
+        playFor = 8.9
+        eventID = "music_angelcity_mcor_titanaction1_high"
+        shouldLoop = false
+        nextPiece = ""
+        nextPieceUsesRank = USE_RANK_OUTRO
+        ...
+    }
+    the_duel.pieces["outro_0"] <- the_duel_outro
+
+    the_duel.events["round_end"] <- StylePoints_ForcePiece
+    the_duel.events["intro_end"] <- StylePoints_TryNextPiece
+
+
+    file.songs["The Duel"] <- the_duel
+
+
+    ////////////////////
+    // BURY THE LIGHT //
+    ////////////////////
+
+    dmc5Song bury_the_light // all sound files for this song amplified by 12dB
+
+    dmc5Piece bury_the_light_intro = 
+    {
+        startAt = 0
+        playFor = 14.4
+        eventID = "music_angelcity_imc_opening"
+        shouldLoop = false
+        nextPiece = "intro_transition_0"
+        nextPieceUsesRank = USE_RANK_NONE
+        ...
+    }
+    bury_the_light.pieces["intro_0"] <- bury_the_light_intro
+
+    dmc5Piece bury_the_light_intro_transition = 
+    {
+        startAt = 1.6
+        playFor = 16.0
+        eventID = "music_angelcity_imc_lose"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_FULL
+        ...
+    }
+    bury_the_light.pieces["intro_transition_0"] <- bury_the_light_intro_transition
+
+    dmc5Piece bury_the_light_chorus = 
+    {
+        startAt = 1.45
+        playFor = 81.5
+        eventID = "music_angelcity_imc_pilotaction1_high"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_FULL
+        ...
+    }
+    bury_the_light.pieces["chorus_0"] <- bury_the_light_chorus
+
+    dmc5Piece bury_the_light_loop_high_0 = 
+    {
+        startAt = 3.2
+        playFor = 54.6
+        eventID = "music_angelcity_imc_pilotaction1_low"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_FULL
+        ...
+    }
+    bury_the_light.pieces["A_loop_0"] <- bury_the_light_loop_high_0
+    bury_the_light.pieces["S_loop_0"] <- bury_the_light_loop_high_0
+    bury_the_light.pieces["SS_loop_0"] <- bury_the_light_loop_high_0
+
+    dmc5Piece bury_the_light_loop_high_1 = 
+    {
+        startAt = 1.45
+        playFor = 78.25
+        eventID = "music_angelcity_imc_pilotaction2_high"
+        shouldLoop = false
+        nextPiece = "chorus"
+        nextPieceUsesRank = USE_RANK_NONE
+        ...
+    }
+    bury_the_light.pieces["A_loop_1"] <- bury_the_light_loop_high_1
+    bury_the_light.pieces["S_loop_1"] <- bury_the_light_loop_high_1
+    bury_the_light.pieces["SS_loop_1"] <- bury_the_light_loop_high_1
+    bury_the_light.pieces["SSS_loop_1"] <- bury_the_light_loop_high_1
+
+    dmc5Piece bury_the_light_loop_sss = 
+    {
+        startAt = 1.45
+        playFor = 55.65
+        eventID = "music_angelcity_imc_pilotaction2_low"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_FULL
+        ...
+    }
+    bury_the_light.pieces["SSS_loop_0"] <- bury_the_light_loop_sss
+
+    dmc5Piece bury_the_light_loop_temp = 
+    {
+        startAt = 0
+        playFor = 6
+        eventID = "crow_mp_intro"
+        shouldLoop = false
+        nextPiece = "loop"
+        nextPieceUsesRank = USE_RANK_FULL
+        ...
+    }
+    bury_the_light.pieces["_loop_0"] <- bury_the_light_loop_temp
+    bury_the_light.pieces["D_loop_0"] <- bury_the_light_loop_temp
+    bury_the_light.pieces["C_loop_0"] <- bury_the_light_loop_temp
+    bury_the_light.pieces["B_loop_0"] <- bury_the_light_loop_temp
+    bury_the_light.pieces["_loop_1"] <- bury_the_light_loop_temp
+    bury_the_light.pieces["D_loop_1"] <- bury_the_light_loop_temp
+    bury_the_light.pieces["C_loop_1"] <- bury_the_light_loop_temp
+    bury_the_light.pieces["B_loop_1"] <- bury_the_light_loop_temp
+
+    
+
+    file.songs["Bury The Light"] <- bury_the_light
+
+    //////////////
+    // SUBHUMAN //
+    //////////////
+
+    ///////////////////
+    // DEVIL TRIGGER //
+    ///////////////////
+}

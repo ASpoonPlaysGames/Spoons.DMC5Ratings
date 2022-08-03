@@ -1,0 +1,4 @@
+{
+    "EventId": [ "crow_mp_intro", "music_mp_pilothunt_intro_flyin", "goblin_mp_intro" ],
+    "AudioSelectionStrategy": "sequential"
+}
